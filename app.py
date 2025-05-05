@@ -1,5 +1,6 @@
 # app.py
 
+import time
 from fastapi import FastAPI, Request
 from pydantic import BaseModel
 import requests
@@ -67,28 +68,24 @@ class PredictRequest(BaseModel):
 
 @app.post("/predict")
 def predict(req: PredictRequest):
-    # حمل الملف من الرابط
+    start = time.time()
+
     response = requests.get(req.audio_url)
     if response.status_code != 200:
         return {"error": "Failed to download file."}
-    
+
     with NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
         tmp_file.write(response.content)
         tmp_path = tmp_file.name
 
-    # معالجة الملف
-    y, sr = librosa.load(tmp_path, sr=16000)
+    y, sr = librosa.load(tmp_path, sr=16000, duration=2.0)
     y = y / np.max(np.abs(y))
+
     features = extract_features(y, sr)
-    
-    expected_feature_size = model.n_features_in_
-    if features.shape[0] != expected_feature_size:
-        features = np.resize(features, expected_feature_size)
-    
     features = (features - X_train_mean) / X_train_std
     features = features.reshape(1, -1)
 
-    # تنبؤ
     pred_index = model.predict(features)[0]
     pred_label = label_encoder.inverse_transform([pred_index])[0]
+
     return {"prediction": pred_label}
