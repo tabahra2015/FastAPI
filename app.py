@@ -67,40 +67,37 @@ def extract_features(y, sr):
 # === Request Schema ===
 class PredictRequest(BaseModel):
     audio_url: str
+
 @app.post("/predict")
 def predict(req: PredictRequest):
-    start = time.time()
-    print(f"\n🕒 Prediction started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("📥 URL Received:", req.audio_url)
 
-    # Step 1: Download audio
-    response = requests.get(req.audio_url)
-    if response.status_code != 200:
-        print("❌ Failed to download file.")
-        return {"error": "Failed to download file."}
+    try:
+        response = requests.get(req.audio_url)
+        print("🌐 Download status:", response.status_code)
+        if response.status_code != 200:
+            return {"error": "Failed to download file."}
 
-    # Step 2: Save to temporary file
-    with NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
-        tmp_file.write(response.content)
-        tmp_path = tmp_file.name
+        with NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+            tmp_file.write(response.content)
+            tmp_path = tmp_file.name
 
-    # Step 3: Load and normalize audio
-    y, sr = librosa.load(tmp_path, sr=16000, duration=2.0)
-    if np.max(np.abs(y)) > 0:
-        y = y / np.max(np.abs(y))
+        y, sr = librosa.load(tmp_path, sr=16000, duration=2.0)
+        if np.max(np.abs(y)) > 0:
+            y = y / np.max(np.abs(y))
 
-    # Step 4: Extract features
-    features = extract_features(y, sr)
-    features = (features - X_train_mean) / X_train_std
-    features = features.reshape(1, -1)
+        features = extract_features(y, sr)
+        print("✅ Features extracted:", features.shape)
 
-    # Step 5: Predict
-    pred_index = model.predict(features)[0]
-    pred_label = label_encoder.inverse_transform([pred_index])[0]
+        features = (features - X_train_mean) / X_train_std
+        features = features.reshape(1, -1)
 
-    end = time.time()
-    duration = end - start
+        pred_index = model.predict(features)[0]
+        pred_label = label_encoder.inverse_transform([pred_index])[0]
 
-    print(f"✅ Prediction ended at:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"⏱️ Total processing time: {duration:.2f} seconds")
+        print("🎯 Prediction:", pred_label)
+        return {"prediction": pred_label}
 
-    return {"prediction": pred_label}
+    except Exception as e:
+        print("🔥 Prediction failed:", e)
+        return {"error": str(e)}
