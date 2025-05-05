@@ -67,15 +67,15 @@ def extract_features(y, sr):
 # === Request Schema ===
 class PredictRequest(BaseModel):
     audio_url: str
-
-# === Prediction Endpoint ===
 @app.post("/predict")
 def predict(req: PredictRequest):
     start = time.time()
+    print(f"\n🕒 Prediction started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     # Step 1: Download audio
     response = requests.get(req.audio_url)
     if response.status_code != 200:
+        print("❌ Failed to download file.")
         return {"error": "Failed to download file."}
 
     # Step 2: Save to temporary file
@@ -96,5 +96,11 @@ def predict(req: PredictRequest):
     # Step 5: Predict
     pred_index = model.predict(features)[0]
     pred_label = label_encoder.inverse_transform([pred_index])[0]
+
+    end = time.time()
+    duration = end - start
+
+    print(f"✅ Prediction ended at:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"⏱️ Total processing time: {duration:.2f} seconds")
 
     return {"prediction": pred_label}

@@ -276,7 +276,7 @@ X_train = (X_train - X_train_mean) / X_train_std
 X_test = (X_test - X_train_mean) / X_train_std
 
 # === Train Model ===
-model = RandomForestClassifier(n_estimators=200, random_state=42)
+model = RandomForestClassifier(n_estimators=50, random_state=42)
 model.fit(X_train, y_train)
 
 # === Test Model ===
