@@ -65,15 +65,12 @@ def extract_features(y, sr):
     return features
 
 # === Request Schema ===
-class PredictRequest(BaseModel):
-    audio_url: str
-from datetime import datetime
+import time
 
 @app.post("/predict")
 def predict(req: PredictRequest):
     start_time = time.time()
     print("📥 URL Received:", req.audio_url)
-    print("🕒 Prediction started at:", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
     try:
         response = requests.get(req.audio_url)
@@ -99,14 +96,13 @@ def predict(req: PredictRequest):
         pred_label = label_encoder.inverse_transform([pred_index])[0]
 
         end_time = time.time()
-        duration = round(end_time - start_time, 3)
-
+        total_time = end_time - start_time
         print("🎯 Prediction:", pred_label)
-        print(f"⏱️ Prediction finished in {duration} seconds")
+        print(f"⏱️ Time taken: {total_time:.2f} seconds")
 
         return {
             "prediction": pred_label,
-            "time_seconds": duration
+            "time_taken_seconds": round(total_time, 2)
         }
 
     except Exception as e:
