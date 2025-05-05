@@ -1,7 +1,5 @@
-# app.py
-
 import time
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from pydantic import BaseModel
 import requests
 import os
@@ -12,6 +10,7 @@ from tempfile import NamedTemporaryFile
 
 app = FastAPI()
 
+# === Load trained components ===
 model = joblib.load("model.pkl")
 label_encoder = joblib.load("label_encoder.pkl")
 X_train_mean = np.load("x_train_mean.npy")
@@ -55,36 +54,46 @@ def extract_features(y, sr):
         normalize_block(agg(rms))
     ])
 
-    # === Ensure consistent size ===
-    expected_feature_size = 180
-    if features.shape[0] != expected_feature_size:
-        features = np.resize(features, expected_feature_size)
+    # === Match feature size to model input ===
+    expected_feature_size = model.n_features_in_
+
+    if features.shape[0] > expected_feature_size:
+        features = features[:expected_feature_size]
+    elif features.shape[0] < expected_feature_size:
+        features = np.pad(features, (0, expected_feature_size - features.shape[0]), mode='constant')
 
     return features
 
-# 
+# === Request Schema ===
 class PredictRequest(BaseModel):
     audio_url: str
 
+# === Prediction Endpoint ===
 @app.post("/predict")
 def predict(req: PredictRequest):
     start = time.time()
 
+    # Step 1: Download audio
     response = requests.get(req.audio_url)
     if response.status_code != 200:
         return {"error": "Failed to download file."}
 
+    # Step 2: Save to temporary file
     with NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
         tmp_file.write(response.content)
         tmp_path = tmp_file.name
 
+    # Step 3: Load and normalize audio
     y, sr = librosa.load(tmp_path, sr=16000, duration=2.0)
-    y = y / np.max(np.abs(y))
+    if np.max(np.abs(y)) > 0:
+        y = y / np.max(np.abs(y))
 
+    # Step 4: Extract features
     features = extract_features(y, sr)
     features = (features - X_train_mean) / X_train_std
     features = features.reshape(1, -1)
 
+    # Step 5: Predict
     pred_index = model.predict(features)[0]
     pred_label = label_encoder.inverse_transform([pred_index])[0]
 
