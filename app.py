@@ -14,6 +14,8 @@ import librosa.display
 import matplotlib.pyplot as plt
 import base64
 from io import BytesIO
+import soundfile as sf
+
 # === Initialize App ===
 app = FastAPI()
 
@@ -100,7 +102,11 @@ def predict(req: PredictRequest):
 
         # Step 3: Load audio
         step3 = time.time()
-        y, sr = librosa.load(tmp_path, sr=16000, duration=2.0)
+        y, sr = sf.read(tmp_path)
+        if sr != 16000:
+            y = librosa.resample(y, orig_sr=sr, target_sr=16000)
+            sr = 16000
+        y = y[:sr * 2]  # limit to 2 seconds
         if np.max(np.abs(y)) > 0:
             y = y / np.max(np.abs(y))
         print(f"⏱️ Load audio time: {time.time() - step3:.2f}s")
