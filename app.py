@@ -71,24 +71,22 @@ def extract_features(y, sr):
 
     return features
 
+from fastapi import UploadFile, File, HTTPException
+from fastapi.responses import JSONResponse
+
 @app.post("/predict")
-def predict(req: PredictRequest):
+async def predict(file: UploadFile = File(...)):
     try:
         overall_start = time.time()
         print(f"\n🕒 Prediction started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
-        # Download audio
-        response = requests.get(req.audio_url)
-        if response.status_code != 200:
-            raise HTTPException(400, detail="Failed to download audio file.")
-        print("⏬ Audio downloaded")
-
+        
+        # === Save uploaded file to temp
         with NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
-            tmp_file.write(response.content)
+            tmp_file.write(await file.read())
             tmp_path = tmp_file.name
         print(f"📁 Temp file path: {tmp_path}")
 
-        # Try to load with soundfile, fallback to librosa
+        # === Try to load using soundfile
         try:
             y, sr = sf.read(tmp_path)
             if sr != 16000:
@@ -98,12 +96,12 @@ def predict(req: PredictRequest):
             print("⚠️ soundfile.read() failed, using librosa.load()")
             y, sr = librosa.load(tmp_path, sr=16000, duration=2.0)
 
-        y = y[:sr * 2]  # truncate to 2s
+        y = y[:sr * 2]  # Truncate to 2 seconds
         if np.max(np.abs(y)) > 0:
             y = y / np.max(np.abs(y))
         print(f"🎧 Audio loaded, sr={sr}, len={len(y)}")
 
-        # Generate waveform image
+        # === Generate waveform image
         try:
             plt.figure(figsize=(10, 3))
             librosa.display.waveshow(y, sr=sr)
@@ -118,24 +116,24 @@ def predict(req: PredictRequest):
             print("⚠️ Waveform plot failed:", str(e))
             waveform_uri = None
 
-        # Feature extraction
+        # === Feature extraction
         features = extract_features(y, sr)
         features = (features - X_train_mean) / X_train_std
         features = features.reshape(1, -1)
 
-        # Predict
+        # === Prediction
         pred_index = model.predict(features)[0]
         pred_label = label_encoder.inverse_transform([pred_index])[0]
 
         print(f"🎯 Prediction: {pred_label}")
         print(f"✅ Total time: {time.time() - overall_start:.2f}s")
 
-        return {
+        return JSONResponse(content={
             "prediction": pred_label,
             "waveform_image_base64": waveform_uri
-        }
+        })
 
     except Exception as e:
         print("❌ Prediction failed:", str(e))
         traceback.print_exc()
-        raise HTTPException(500, detail="Prediction crashed on server.")
+        raise HTTPException(status_code=500, detail="Prediction crashed on server.")
