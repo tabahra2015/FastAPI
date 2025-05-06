@@ -1,16 +1,22 @@
 import time
-from fastapi import FastAPI
-from pydantic import BaseModel
-import requests
 import os
 import numpy as np
 import librosa
-import joblib 
+import joblib
+import requests
+from fastapi import FastAPI
+from pydantic import BaseModel
+from datetime import datetime
 from tempfile import NamedTemporaryFile
 
+# === Initialize App ===
 app = FastAPI()
 
-# === Load trained components ===
+# === Define Request Schema ===
+class PredictRequest(BaseModel):
+    audio_url: str
+
+# === Load Trained Components ===
 model = joblib.load("model.pkl")
 label_encoder = joblib.load("label_encoder.pkl")
 X_train_mean = np.load("x_train_mean.npy")
@@ -54,7 +60,6 @@ def extract_features(y, sr):
         normalize_block(agg(rms))
     ])
 
-    # === Match feature size to model input ===
     expected_feature_size = model.n_features_in_
 
     if features.shape[0] > expected_feature_size:
@@ -64,47 +69,41 @@ def extract_features(y, sr):
 
     return features
 
-# === Request Schema ===
-import time
-
+# === Prediction Endpoint ===
 @app.post("/predict")
 def predict(req: PredictRequest):
-    start_time = time.time()
-    print("📥 URL Received:", req.audio_url)
+    start = time.time()
+    print(f"\n🕒 Prediction started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-    try:
-        response = requests.get(req.audio_url)
-        print("🌐 Download status:", response.status_code)
-        if response.status_code != 200:
-            return {"error": "Failed to download file."}
+    # Step 1: Download audio
+    response = requests.get(req.audio_url)
+    if response.status_code != 200:
+        print("❌ Failed to download file.")
+        return {"error": "Failed to download file."}
 
-        with NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
-            tmp_file.write(response.content)
-            tmp_path = tmp_file.name
+    # Step 2: Save to temp file
+    with NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+        tmp_file.write(response.content)
+        tmp_path = tmp_file.name
 
-        y, sr = librosa.load(tmp_path, sr=16000, duration=2.0)
-        if np.max(np.abs(y)) > 0:
-            y = y / np.max(np.abs(y))
+    # Step 3: Load audio
+    y, sr = librosa.load(tmp_path, sr=16000, duration=2.0)
+    if np.max(np.abs(y)) > 0:
+        y = y / np.max(np.abs(y))
 
-        features = extract_features(y, sr)
-        print("✅ Features extracted:", features.shape)
+    # Step 4: Extract features
+    features = extract_features(y, sr)
+    features = (features - X_train_mean) / X_train_std
+    features = features.reshape(1, -1)
 
-        features = (features - X_train_mean) / X_train_std
-        features = features.reshape(1, -1)
+    # Step 5: Predict
+    pred_index = model.predict(features)[0]
+    pred_label = label_encoder.inverse_transform([pred_index])[0]
 
-        pred_index = model.predict(features)[0]
-        pred_label = label_encoder.inverse_transform([pred_index])[0]
+    end = time.time()
+    duration = end - start
 
-        end_time = time.time()
-        total_time = end_time - start_time
-        print("🎯 Prediction:", pred_label)
-        print(f"⏱️ Time taken: {total_time:.2f} seconds")
+    print(f"✅ Prediction ended at:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"⏱️ Total processing time: {duration:.2f} seconds")
 
-        return {
-            "prediction": pred_label,
-            "time_taken_seconds": round(total_time, 2)
-        }
-
-    except Exception as e:
-        print("🔥 Prediction failed:", e)
-        return {"error": str(e)}
+    return {"prediction": pred_label}
