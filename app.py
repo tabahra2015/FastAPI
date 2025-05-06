@@ -1,5 +1,7 @@
+from http.client import HTTPException
 import time
 import os
+import traceback
 import numpy as np
 import librosa
 import joblib
@@ -73,62 +75,70 @@ def extract_features(y, sr):
     return features
 
 
+
 # === Prediction Endpoint ===
 @app.post("/predict")
 def predict(req: PredictRequest):
-    overall_start = time.time()
-    print(f"\n🕒 Prediction started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    try:
+        overall_start = time.time()
+        print(f"\n🕒 Prediction started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-    # Step 1: Download audio
-    step1 = time.time()
-    response = requests.get(req.audio_url)
-    print(f"⏱️ Download time: {time.time() - step1:.2f}s")
+        # Step 1: Download audio
+        step1 = time.time()
+        response = requests.get(req.audio_url)
+        print(f"⏱️ Download time: {time.time() - step1:.2f}s")
 
-    if response.status_code != 200:
-        return {"error": "Failed to download file."}
+        if response.status_code != 200:
+            return {"error": "Failed to download file."}
 
-    # Step 2: Save to file
-    step2 = time.time()
-    with NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
-        tmp_file.write(response.content)
-        tmp_path = tmp_file.name
-    print(f"⏱️ Save file time: {time.time() - step2:.2f}s")
+        # Step 2: Save to file
+        step2 = time.time()
+        with NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+            tmp_file.write(response.content)
+            tmp_path = tmp_file.name
+        print(f"⏱️ Save file time: {time.time() - step2:.2f}s")
 
-    # Step 3: Load audio
-    step3 = time.time()
-    y, sr = librosa.load(tmp_path, sr=16000, duration=2.0)
-    if np.max(np.abs(y)) > 0:
-        y = y / np.max(np.abs(y))
-    print(f"⏱️ Load audio time: {time.time() - step3:.2f}s")
+        # Step 3: Load audio
+        step3 = time.time()
+        y, sr = librosa.load(tmp_path, sr=16000, duration=2.0)
+        if np.max(np.abs(y)) > 0:
+            y = y / np.max(np.abs(y))
+        print(f"⏱️ Load audio time: {time.time() - step3:.2f}s")
 
-    # === Plot waveform and convert to base64 ===
-    plt.figure(figsize=(10, 3))
-    librosa.display.waveshow(y, sr=sr)
-    plt.axis('off')
-    buf = BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
-    plt.close()
-    buf.seek(0)
-    waveform_base64 = base64.b64encode(buf.read()).decode('utf-8')
-    waveform_uri = f"data:image/png;base64,{waveform_base64}"
+        # === Plot waveform and convert to base64 ===
+        plt.figure(figsize=(10, 3))
+        librosa.display.waveshow(y, sr=sr)
+        plt.axis('off')
+        buf = BytesIO()
+        plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
+        plt.close()
+        buf.seek(0)
+        waveform_base64 = base64.b64encode(buf.read()).decode('utf-8')
+        waveform_uri = f"data:image/png;base64,{waveform_base64}"
 
-    # Step 4: Feature extraction
-    step4 = time.time()
-    features = extract_features(y, sr)
-    features = (features - X_train_mean) / X_train_std
-    features = features.reshape(1, -1)
-    print(f"⏱️ Feature extraction time: {time.time() - step4:.2f}s")
+        # Step 4: Feature extraction
+        step4 = time.time()
+        features = extract_features(y, sr)
+        features = (features - X_train_mean) / X_train_std
+        features = features.reshape(1, -1)
+        print(f"⏱️ Feature extraction time: {time.time() - step4:.2f}s")
 
-    # Step 5: Prediction
-    step5 = time.time()
-    pred_index = model.predict(features)[0]
-    pred_label = label_encoder.inverse_transform([pred_index])[0]
-    print(f"⏱️ Model prediction time: {time.time() - step5:.2f}s")
+        # Step 5: Prediction
+        step5 = time.time()
+        pred_index = model.predict(features)[0]
+        pred_label = label_encoder.inverse_transform([pred_index])[0]
+        print(f"⏱️ Model prediction time: {time.time() - step5:.2f}s")
 
-    print(f"✅ Prediction ended at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"⏱️ Total time: {time.time() - overall_start:.2f}s")
+        print(f"✅ Prediction ended at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"⏱️ Total time: {time.time() - overall_start:.2f}s")
 
-    return {
-        "prediction": pred_label,
-        "waveform_image_base64": waveform_uri
-    }
+        return {
+            "prediction": pred_label,
+            "waveform_image_base64": waveform_uri
+        }
+    except Exception as e:
+        print("❌ Prediction failed:", str(e))
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail="Prediction crashed on server.")
+
+
