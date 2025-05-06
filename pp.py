@@ -130,34 +130,33 @@
 # plt.ylabel("Amplitude")
 # plt.tight_layout()
 # plt.show()
-
-
-
-import os
-import librosa
-import librosa.display
+import traceback
 import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-from sklearn.preprocessing import LabelEncoder
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score, classification_report
-import sounddevice as sd
-from scipy.io.wavfile import write
-from IPython.display import display
-import ipywidgets as widgets
-import warnings
+import librosa
+import joblib
+import os
+from pydantic import BaseModel
+from tempfile import NamedTemporaryFile
+import soundfile as sf
+from fastapi import UploadFile, File, HTTPException
+from fastapi.responses import JSONResponse
+import time
+from datetime import datetime
 
-# === Settings ===
-warnings.filterwarnings('ignore')  # Ignore librosa warnings
 
-wav_folder = "converted_wav"
-output_file = "custom_isolet_style.csv"
+app = FastAPI()
 
-# === Feature Extraction ===
+class PredictRequest(BaseModel):
+    audio_url: str
+
+# Load model and preprocessing
+model = joblib.load("model.pkl")
+label_encoder = joblib.load("label_encoder.pkl")
+X_train_mean = np.load("x_train_mean.npy")
+X_train_std = np.load("x_train_std.npy")
+
 def extract_features(y, sr):
-    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13, n_fft=256, hop_length=128)
+    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13, n_fft=256, hop_length=128, fmax=sr/2)
     if mfcc.shape[1] < 9:
         mfcc = np.pad(mfcc, ((0, 0), (0, 9 - mfcc.shape[1])), mode='edge')
 
@@ -192,114 +191,63 @@ def extract_features(y, sr):
         normalize_block(agg(zcr)),
         normalize_block(agg(rms))
     ])
+
+    expected_feature_size = model.n_features_in_
+    if features.shape[0] > expected_feature_size:
+        features = features[:expected_feature_size]
+    elif features.shape[0] < expected_feature_size:
+        features = np.pad(features, (0, expected_feature_size - features.shape[0]), mode='constant')
+
     return features
 
-# === Create Dataset ===
-rows = []
-file_names = []   # 📋 To store filenames
 
-for file in os.listdir(wav_folder):
-    if file.endswith(".wav"):
-        try:
-            path = os.path.join(wav_folder, file)
-            y, sr = librosa.load(path, sr=16000)
-            y = y / np.max(np.abs(y))
-            features = extract_features(y, sr)
-            label = file[0].upper()
-            row = np.append(features, label)
-            rows.append(row)
-            file_names.append(file)  # 📋 Save filename
-        except Exception as e:
-            print(f"⚠️ Error processing {file}: {e}")
 
-# === Save dataset ===
-feature_dim = len(rows[0]) - 1
-columns = [f'f{i+1}' for i in range(feature_dim)] + ['label']
-df = pd.DataFrame(rows, columns=columns)
-df.to_csv(output_file, index=False)
-print(f"✅ Data saved in ISOLET style with shape: {df.shape}")
-
-# === Prepare Data for Training ===
-X = np.array([r[:-1] for r in rows]).astype(np.float32)   # 🚨 force features to float
-y_labels = np.array([r[-1] for r in rows])   # labels
-file_names = np.array(file_names)     # filenames
-
-label_encoder = LabelEncoder()
-y = label_encoder.fit_transform(y_labels)
-
-# 📊 Show Class Balance
-print("\n📊 Class distribution in dataset:")
-print(pd.Series(y_labels).value_counts())
-
-# Normalize
-X = (X - np.mean(X, axis=0)) / (np.std(X, axis=0) + 1e-8)
-
-# === Split Data 70% Train / 30% Test (with filenames)
-X_train, X_test, y_train, y_test, files_train, files_test = train_test_split(
-    X, y, file_names, test_size=0.3, random_state=42
-)
-
-# === Build Random Forest Model ===
-model = RandomForestClassifier(
-    n_estimators=300,
-    max_depth=20,
-    class_weight='balanced',
-    random_state=42
-)
-model.fit(X_train, y_train)
-
-# === Evaluate ===
-y_pred = model.predict(X_test)
-acc = accuracy_score(y_test, y_pred)
-print(f"\n✅ Random Forest Test Accuracy: {acc:.2f}")
-print("\n📄 Classification Report:")
-print(classification_report(y_test, y_pred, target_names=label_encoder.classes_))
-
-# === Predict Only Test WAV Files ===
-print("\n🔎 Predictions for test WAV files:")
-
-predictions = []
-
-for filename in files_test:
+@app.post("/predict")
+async def predict(file: UploadFile = File(...)):
     try:
-        path = os.path.join(wav_folder, filename)
-        y, sr = librosa.load(path, sr=16000)
-        y = y / np.max(np.abs(y))
+        overall_start = time.time()
+        print(f"\n🕒 Prediction started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+        # === Save the uploaded file
+        with NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+            tmp_file.write(await file.read())
+            tmp_path = tmp_file.name
+        print(f"📁 Temp file path: {tmp_path}")
+
+        # === Load audio (try soundfile, fallback to librosa)
+        try:
+            y, sr = sf.read(tmp_path)
+            if sr != 16000:
+                y = librosa.resample(y, orig_sr=sr, target_sr=16000)
+                sr = 16000
+        except Exception as e:
+            print("⚠️ soundfile.read() failed, falling back to librosa.load()")
+            y, sr = librosa.load(tmp_path, sr=16000, duration=2.0)
+
+        # === Normalize and truncate
+        y = y[:sr * 2]
+        if np.max(np.abs(y)) > 0:
+            y = y / np.max(np.abs(y))
+
+        print(f"🎧 Audio loaded. sr={sr}, samples={len(y)}")
+
+        # === Feature extraction
         features = extract_features(y, sr)
-        features = (features - np.mean(X_train, axis=0)) / (np.std(X_train, axis=0) + 1e-8)
+        features = (features - X_train_mean) / X_train_std
         features = features.reshape(1, -1)
 
+        # === Prediction
         pred_index = model.predict(features)[0]
         pred_label = label_encoder.inverse_transform([pred_index])[0]
 
-        print(f"📂 {filename} -> 📢 Predicted: {pred_label}")
-        predictions.append((filename, pred_label))
-    
+        print(f"🎯 Prediction: {pred_label}")
+        print(f"✅ Done in {time.time() - overall_start:.2f} seconds")
+
+        return JSONResponse(content={
+            "prediction": pred_label,
+        })
+
     except Exception as e:
-        print(f"⚠️ Error processing {filename}: {e}")
-
-# 📄 Save test predictions
-pred_df = pd.DataFrame(predictions, columns=["filename", "predicted_label"])
-pred_df.to_csv("test_predictions.csv", index=False)
-print("\n✅ Test predictions saved to test_predictions.csv")
-
-# === Predict and Plot a Specific File ===
-filepath = "B23.wav"
-y, sr = librosa.load(filepath, sr=16000)
-y = y / np.max(np.abs(y))
-features = extract_features(y, sr)
-features = (features - np.mean(X_train, axis=0)) / (np.std(X_train, axis=0) + 1e-8)
-features = features.reshape(1, -1)
-predicted_label = label_encoder.inverse_transform(model.predict(features))[0]
-
-print(f"\n📂 File: {filepath}")
-print(f"📢 Predicted letter: {predicted_label}")
-
-plt.figure(figsize=(10, 4))
-librosa.display.waveplot(y, sr=sr)
-plt.title(f"Waveform of {filepath}", fontsize=14)
-plt.text(0.01, 0.88, f"📢 Predicted: {predicted_label}", transform=plt.gca().transAxes, fontsize=12, color='blue')
-plt.xlabel("Time (s)")
-plt.ylabel("Amplitude")
-plt.tight_layout()
-plt.show()
+        print("❌ Prediction failed:", e)
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail="Prediction crashed on server.")
