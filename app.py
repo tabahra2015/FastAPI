@@ -1,4 +1,3 @@
-from fastapi import FastAPI, HTTPException
 import traceback
 import numpy as np
 import librosa
@@ -14,6 +13,16 @@ import base64
 from io import BytesIO
 from datetime import datetime
 import time
+from fastapi import UploadFile, File, HTTPException
+from fastapi.responses import JSONResponse
+
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import JSONResponse
+import time, traceback, base64, librosa, soundfile as sf, matplotlib.pyplot as plt
+import numpy as np
+from io import BytesIO
+from datetime import datetime
+
 
 app = FastAPI()
 
@@ -71,37 +80,38 @@ def extract_features(y, sr):
 
     return features
 
-from fastapi import UploadFile, File, HTTPException
-from fastapi.responses import JSONResponse
+
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     try:
         overall_start = time.time()
         print(f"\n🕒 Prediction started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        
-        # === Save uploaded file to temp
+
+        # === Save the uploaded file
         with NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
             tmp_file.write(await file.read())
             tmp_path = tmp_file.name
         print(f"📁 Temp file path: {tmp_path}")
 
-        # === Try to load using soundfile
+        # === Load audio (try soundfile, fallback to librosa)
         try:
             y, sr = sf.read(tmp_path)
             if sr != 16000:
                 y = librosa.resample(y, orig_sr=sr, target_sr=16000)
                 sr = 16000
         except Exception as e:
-            print("⚠️ soundfile.read() failed, using librosa.load()")
+            print("⚠️ soundfile.read() failed, falling back to librosa.load()")
             y, sr = librosa.load(tmp_path, sr=16000, duration=2.0)
 
-        y = y[:sr * 2]  # Truncate to 2 seconds
+        # === Normalize and truncate
+        y = y[:sr * 2]
         if np.max(np.abs(y)) > 0:
             y = y / np.max(np.abs(y))
-        print(f"🎧 Audio loaded, sr={sr}, len={len(y)}")
 
-        # === Generate waveform image
+        print(f"🎧 Audio loaded. sr={sr}, samples={len(y)}")
+
+        # === Waveform plot
         try:
             plt.figure(figsize=(10, 3))
             librosa.display.waveshow(y, sr=sr)
@@ -113,7 +123,7 @@ async def predict(file: UploadFile = File(...)):
             waveform_base64 = base64.b64encode(buf.read()).decode('utf-8')
             waveform_uri = f"data:image/png;base64,{waveform_base64}"
         except Exception as e:
-            print("⚠️ Waveform plot failed:", str(e))
+            print("⚠️ Could not generate waveform image:", e)
             waveform_uri = None
 
         # === Feature extraction
@@ -126,7 +136,7 @@ async def predict(file: UploadFile = File(...)):
         pred_label = label_encoder.inverse_transform([pred_index])[0]
 
         print(f"🎯 Prediction: {pred_label}")
-        print(f"✅ Total time: {time.time() - overall_start:.2f}s")
+        print(f"✅ Done in {time.time() - overall_start:.2f} seconds")
 
         return JSONResponse(content={
             "prediction": pred_label,
@@ -134,6 +144,6 @@ async def predict(file: UploadFile = File(...)):
         })
 
     except Exception as e:
-        print("❌ Prediction failed:", str(e))
+        print("❌ Prediction failed:", e)
         traceback.print_exc()
         raise HTTPException(status_code=500, detail="Prediction crashed on server.")
