@@ -72,38 +72,45 @@ def extract_features(y, sr):
 # === Prediction Endpoint ===
 @app.post("/predict")
 def predict(req: PredictRequest):
-    start = time.time()
+    overall_start = time.time()
     print(f"\n🕒 Prediction started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     # Step 1: Download audio
+    step1 = time.time()
     response = requests.get(req.audio_url)
+    print(f"⏱️ Download time: {time.time() - step1:.2f}s")
+
     if response.status_code != 200:
-        print("❌ Failed to download file.")
         return {"error": "Failed to download file."}
 
-    # Step 2: Save to temp file
+    # Step 2: Save to file
+    step2 = time.time()
     with NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
         tmp_file.write(response.content)
         tmp_path = tmp_file.name
+    print(f"⏱️ Save file time: {time.time() - step2:.2f}s")
 
     # Step 3: Load audio
+    step3 = time.time()
     y, sr = librosa.load(tmp_path, sr=16000, duration=2.0)
     if np.max(np.abs(y)) > 0:
         y = y / np.max(np.abs(y))
+    print(f"⏱️ Load audio time: {time.time() - step3:.2f}s")
 
-    # Step 4: Extract features
+    # Step 4: Feature extraction
+    step4 = time.time()
     features = extract_features(y, sr)
     features = (features - X_train_mean) / X_train_std
     features = features.reshape(1, -1)
+    print(f"⏱️ Feature extraction time: {time.time() - step4:.2f}s")
 
-    # Step 5: Predict
+    # Step 5: Prediction
+    step5 = time.time()
     pred_index = model.predict(features)[0]
     pred_label = label_encoder.inverse_transform([pred_index])[0]
+    print(f"⏱️ Model prediction time: {time.time() - step5:.2f}s")
 
-    end = time.time()
-    duration = end - start
-
-    print(f"✅ Prediction ended at:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"⏱️ Total processing time: {duration:.2f} seconds")
+    print(f"✅ Prediction ended at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"⏱️ Total time: {time.time() - overall_start:.2f}s")
 
     return {"prediction": pred_label}
