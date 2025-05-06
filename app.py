@@ -8,7 +8,10 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from datetime import datetime
 from tempfile import NamedTemporaryFile
-
+import librosa.display
+import matplotlib.pyplot as plt
+import base64
+from io import BytesIO
 # === Initialize App ===
 app = FastAPI()
 
@@ -69,6 +72,7 @@ def extract_features(y, sr):
 
     return features
 
+
 # === Prediction Endpoint ===
 @app.post("/predict")
 def predict(req: PredictRequest):
@@ -97,6 +101,17 @@ def predict(req: PredictRequest):
         y = y / np.max(np.abs(y))
     print(f"⏱️ Load audio time: {time.time() - step3:.2f}s")
 
+    # === Plot waveform and convert to base64 ===
+    plt.figure(figsize=(10, 3))
+    librosa.display.waveshow(y, sr=sr)
+    plt.axis('off')
+    buf = BytesIO()
+    plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
+    plt.close()
+    buf.seek(0)
+    waveform_base64 = base64.b64encode(buf.read()).decode('utf-8')
+    waveform_uri = f"data:image/png;base64,{waveform_base64}"
+
     # Step 4: Feature extraction
     step4 = time.time()
     features = extract_features(y, sr)
@@ -113,4 +128,7 @@ def predict(req: PredictRequest):
     print(f"✅ Prediction ended at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"⏱️ Total time: {time.time() - overall_start:.2f}s")
 
-    return {"prediction": pred_label}
+    return {
+        "prediction": pred_label,
+        "waveform_image_base64": waveform_uri
+    }
