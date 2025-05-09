@@ -22,6 +22,7 @@ import time, traceback, base64, librosa, soundfile as sf, matplotlib.pyplot as p
 import numpy as np
 from io import BytesIO
 from datetime import datetime
+from scipy.io import wavfile
 
 
 app = FastAPI()
