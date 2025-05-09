@@ -1,6 +1,11 @@
 services:
   - type: web
-    name: audio-api
-    env: python
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "uvicorn app:app --host 0.0.0.0 --port 10000"
+    name:  FastAPI
+    env: docker
+    plan: free
+    repo: https://github.com/tabahra2015/FastAPI
+    branch: main
+    dockerfilePath: Dockerfile
+    envVars:
+      - key: PORT
+        value: 8000
