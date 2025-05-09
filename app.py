@@ -84,54 +84,43 @@ def extract_features(y, sr):
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
+    overall_start = time.time()
+    print(f"\n🕒 Prediction started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
     try:
-        overall_start = time.time()
-        print(f"\n🕒 Prediction started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        # Load audio directly from memory (fast)
+        audio_data = await file.read()
+        y, sr = librosa.load(BytesIO(audio_data), sr=16000, duration=2.0)
 
-        # === Save the uploaded file
+        # Explicitly convert to WAV PCM to ensure compatibility
         with NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
-            tmp_file.write(await file.read())
+            wavfile.write(tmp_file.name, sr, (y * 32767).astype(np.int16))
             tmp_path = tmp_file.name
-        print(f"📁 Temp file path: {tmp_path}")
 
-        # === Load audio (try soundfile, fallback to librosa)
-        try:
-            y, sr = sf.read(tmp_path)
-            if sr != 16000:
-                y = librosa.resample(y, orig_sr=sr, target_sr=16000)
-                sr = 16000
-        except Exception as e:
-            print("⚠️ soundfile.read() failed, falling back to librosa.load()")
-            y, sr = librosa.load(tmp_path, sr=16000, duration=2.0)
+        # Efficiently read back with soundfile
+        y, sr = sf.read(tmp_path)
 
-        # === Normalize and truncate
+        # Normalize audio
         y = y[:sr * 2]
-        if np.max(np.abs(y)) > 0:
-            y = y / np.max(np.abs(y))
+        y /= np.max(np.abs(y)) + 1e-6
 
-        print(f"🎧 Audio loaded. sr={sr}, samples={len(y)}")
+        # Generate waveform image (optional but helpful)
+        plt.figure(figsize=(10, 3))
+        librosa.display.waveshow(y, sr=sr)
+        plt.axis('off')
+        buf = BytesIO()
+        plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
+        plt.close()
+        buf.seek(0)
+        waveform_base64 = base64.b64encode(buf.read()).decode('utf-8')
+        waveform_uri = f"data:image/png;base64,{waveform_base64}"
 
-        # === Waveform plot
-        try:
-            plt.figure(figsize=(10, 3))
-            librosa.display.waveshow(y, sr=sr)
-            plt.axis('off')
-            buf = BytesIO()
-            plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
-            plt.close()
-            buf.seek(0)
-            waveform_base64 = base64.b64encode(buf.read()).decode('utf-8')
-            waveform_uri = f"data:image/png;base64,{waveform_base64}"
-        except Exception as e:
-            print("⚠️ Could not generate waveform image:", e)
-            waveform_uri = None
-
-        # === Feature extraction
+        # Extract and scale features
         features = extract_features(y, sr)
         features = (features - X_train_mean) / X_train_std
         features = features.reshape(1, -1)
 
-        # === Prediction
+        # Fast prediction
         pred_index = model.predict(features)[0]
         pred_label = label_encoder.inverse_transform([pred_index])[0]
 
