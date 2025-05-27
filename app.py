@@ -1,7 +1,6 @@
 import traceback
 import numpy as np
 import librosa
-import joblib
 import os
 from tempfile import NamedTemporaryFile
 import soundfile as sf
@@ -14,21 +13,21 @@ import time
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 from scipy.io import wavfile
-
+from tensorflow.keras.models import load_model
+import joblib  # لا زلنا نستخدمه لتحميل label_encoder
 
 app = FastAPI()
-
 
 # Optional health check route
 @app.get("/")
 def health():
     return {"status": "✅ Server is live"}
 
-
 # Load model and preprocessing data
 try:
-    model = joblib.load("model.pkl")
-    label_encoder = joblib.load("label_encoder.pkl")
+# في السيرفر:
+    model = load_model("keras_model.h5")
+    label_encoder = joblib.load("label_encoder.pkl")  # تحميل الترميز
     X_train_mean = np.load("x_train_mean.npy")
     X_train_std = np.load("x_train_std.npy")
 except Exception as e:
@@ -74,7 +73,8 @@ def extract_features(y, sr):
         normalize_block(agg(rms))
     ])
 
-    expected_feature_size = model.n_features_in_
+    # ضبط حجم الميزات بناءً على عدد ميزات نموذج Keras
+    expected_feature_size = model.input_shape[-1]  # نموذج Keras عادة يأخذ input shape مثل (None, features)
     if features.shape[0] > expected_feature_size:
         features = features[:expected_feature_size]
     elif features.shape[0] < expected_feature_size:
@@ -118,10 +118,14 @@ async def predict(file: UploadFile = File(...)):
         # Extract features and scale
         features = extract_features(y, sr)
         features = (features - X_train_mean) / X_train_std
+
+        # النموذج Keras يحتاج عادة مدخلات بشكل (batch_size, features)
         features = features.reshape(1, -1)
 
         # Predict
-        pred_index = model.predict(features)[0]
+        pred_probs = model.predict(features)
+        pred_index = np.argmax(pred_probs, axis=1)[0]
+
         pred_label = label_encoder.inverse_transform([pred_index])[0]
 
         print(f"🎯 Prediction: {pred_label}")
