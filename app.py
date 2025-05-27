@@ -2,9 +2,7 @@ import traceback
 import numpy as np
 import librosa
 import joblib
-import requests
 import os
-from pydantic import BaseModel
 from tempfile import NamedTemporaryFile
 import soundfile as sf
 import librosa.display
@@ -13,28 +11,31 @@ import base64
 from io import BytesIO
 from datetime import datetime
 import time
-from fastapi import UploadFile, File, HTTPException
-from fastapi.responses import JSONResponse
-
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
-import time, traceback, base64, librosa, soundfile as sf, matplotlib.pyplot as plt
-import numpy as np
-from io import BytesIO
-from datetime import datetime
 from scipy.io import wavfile
 
 
 app = FastAPI()
 
-class PredictRequest(BaseModel):
-    audio_url: str
 
-# Load model and preprocessing
-model = joblib.load("model.pkl")
-label_encoder = joblib.load("label_encoder.pkl")
-X_train_mean = np.load("x_train_mean.npy")
-X_train_std = np.load("x_train_std.npy")
+# Optional health check route
+@app.get("/")
+def health():
+    return {"status": "✅ Server is live"}
+
+
+# Load model and preprocessing data
+try:
+    model = joblib.load("model.pkl")
+    label_encoder = joblib.load("label_encoder.pkl")
+    X_train_mean = np.load("x_train_mean.npy")
+    X_train_std = np.load("x_train_std.npy")
+except Exception as e:
+    print("❌ Model or preprocessing files could not be loaded.")
+    traceback.print_exc()
+    raise RuntimeError("Server initialization failed")
+
 
 def extract_features(y, sr):
     mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13, n_fft=256, hop_length=128, fmax=sr/2)
@@ -82,51 +83,49 @@ def extract_features(y, sr):
     return features
 
 
-
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
-    overall_start = time.time()
-    print(f"\n🕒 Prediction started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
     try:
-        # Load audio directly from memory (fast)
+        start_time = time.time()
+        print(f"\n🕒 Prediction started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+        # Read audio
         audio_data = await file.read()
-        y, sr = librosa.load(BytesIO(audio_data), sr=16000, duration=2.0)
 
-        # Explicitly convert to WAV PCM to ensure compatibility
-        with NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
-            wavfile.write(tmp_file.name, sr, (y * 32767).astype(np.int16))
-            tmp_path = tmp_file.name
+        # Load with librosa
+        y, sr = librosa.load(BytesIO(audio_data), sr=16000, mono=True, duration=2.0)
 
-        # Efficiently read back with soundfile
+        # Save as PCM 16-bit WAV
+        with NamedTemporaryFile(delete=False, suffix=".wav") as tmp_wav:
+            wavfile.write(tmp_wav.name, sr, (y * 32767).astype(np.int16))
+            tmp_path = tmp_wav.name
+
+        # Reload with soundfile (stable for feature extraction)
         y, sr = sf.read(tmp_path)
-
-        # Normalize audio
         y = y[:sr * 2]
-        y /= np.max(np.abs(y)) + 1e-6
+        y = y / (np.max(np.abs(y)) + 1e-6)
 
-        # Generate waveform image (optional but helpful)
+        # Generate waveform image
         plt.figure(figsize=(10, 3))
         librosa.display.waveshow(y, sr=sr)
         plt.axis('off')
         buf = BytesIO()
         plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
         plt.close()
-        buf.seek(0)
-        waveform_base64 = base64.b64encode(buf.read()).decode('utf-8')
+        waveform_base64 = base64.b64encode(buf.getvalue()).decode()
         waveform_uri = f"data:image/png;base64,{waveform_base64}"
 
-        # Extract and scale features
+        # Extract features and scale
         features = extract_features(y, sr)
         features = (features - X_train_mean) / X_train_std
         features = features.reshape(1, -1)
 
-        # Fast prediction
+        # Predict
         pred_index = model.predict(features)[0]
         pred_label = label_encoder.inverse_transform([pred_index])[0]
 
         print(f"🎯 Prediction: {pred_label}")
-        print(f"✅ Done in {time.time() - overall_start:.2f} seconds")
+        print(f"✅ Done in {time.time() - start_time:.2f} seconds")
 
         return JSONResponse(content={
             "prediction": pred_label,
