@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from scipy.io import wavfile
 from tensorflow.keras.models import load_model
 import joblib  # لا زلنا نستخدمه لتحميل label_encoder
+import subprocess
 
 app = FastAPI()
 
@@ -25,7 +26,6 @@ def health():
 
 # Load model and preprocessing data
 try:
-# في السيرفر:
     model = load_model("keras_model.h5")
     label_encoder = joblib.load("label_encoder.pkl")  # تحميل الترميز
     X_train_mean = np.load("x_train_mean.npy")
@@ -34,7 +34,6 @@ except Exception as e:
     print("❌ Model or preprocessing files could not be loaded.")
     traceback.print_exc()
     raise RuntimeError("Server initialization failed")
-
 
 def extract_features(y, sr):
     mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13, n_fft=256, hop_length=128, fmax=sr/2)
@@ -73,15 +72,13 @@ def extract_features(y, sr):
         normalize_block(agg(rms))
     ])
 
-    # ضبط حجم الميزات بناءً على عدد ميزات نموذج Keras
-    expected_feature_size = model.input_shape[-1]  # نموذج Keras عادة يأخذ input shape مثل (None, features)
+    expected_feature_size = model.input_shape[-1]
     if features.shape[0] > expected_feature_size:
         features = features[:expected_feature_size]
     elif features.shape[0] < expected_feature_size:
         features = np.pad(features, (0, expected_feature_size - features.shape[0]), mode='constant')
 
     return features
-
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
@@ -92,16 +89,29 @@ async def predict(file: UploadFile = File(...)):
         # Read audio
         audio_data = await file.read()
 
-        # Load with librosa
-        y, sr = librosa.load(BytesIO(audio_data), sr=16000, mono=True, duration=2.0)
+        # Save original file temporarily
+        with NamedTemporaryFile(delete=False, suffix=".wav") as original_file:
+            original_file.write(audio_data)
+            original_path = original_file.name
 
-        # Save as PCM 16-bit WAV
-        with NamedTemporaryFile(delete=False, suffix=".wav") as tmp_wav:
-            wavfile.write(tmp_wav.name, sr, (y * 32767).astype(np.int16))
-            tmp_path = tmp_wav.name
+        # Convert to PCM 16-bit, 16kHz, Mono using ffmpeg
+        with NamedTemporaryFile(delete=False, suffix=".wav") as converted_file:
+            converted_path = converted_file.name
+
+        command = [
+            "ffmpeg",
+            "-y",
+            "-i", original_path,
+            "-acodec", "pcm_s16le",
+            "-ar", "16000",
+            "-ac", "1",
+            converted_path
+        ]
+
+        subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         # Reload with soundfile (stable for feature extraction)
-        y, sr = sf.read(tmp_path)
+        y, sr = sf.read(converted_path)
         y = y[:sr * 2]
         y = y / (np.max(np.abs(y)) + 1e-6)
 
@@ -118,14 +128,11 @@ async def predict(file: UploadFile = File(...)):
         # Extract features and scale
         features = extract_features(y, sr)
         features = (features - X_train_mean) / X_train_std
-
-        # النموذج Keras يحتاج عادة مدخلات بشكل (batch_size, features)
         features = features.reshape(1, -1)
 
         # Predict
         pred_probs = model.predict(features)
         pred_index = np.argmax(pred_probs, axis=1)[0]
-
         pred_label = label_encoder.inverse_transform([pred_index])[0]
 
         print(f"🎯 Prediction: {pred_label}")
