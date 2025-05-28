@@ -129,6 +129,7 @@ async def predict(file: UploadFile = File(...)):
         features = extract_features(y, sr)
         features = (features - X_train_mean) / X_train_std
         features = features.reshape(1, -1)
+        print(f"🎯 Prediction: {features}")
 
         # Predict
         pred_probs = model.predict(features)
