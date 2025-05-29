@@ -441,7 +441,7 @@ from keras.models import load_model
 try:
     mlp_model = load_model("mlp_model.h5")
     cnn_model = load_model("cnn_model.h5")
-    rf_model = joblib.load("rf_model.pkl")
+    rf_model = joblib.load("random_forest_model.pkl")
     label_encoder = joblib.load("label_encoder.pkl")
     X_train_mean = np.load("x_train_mean.npy")
     X_train_std = np.load("x_train_std.npy")
