@@ -417,34 +417,31 @@
 #         print("❌ Prediction failed:", e)
 #         traceback.print_exc()
 #         raise HTTPException(status_code=500, detail="Prediction crashed on server.")
-import traceback
-import numpy as np
-import librosa
+
+
 import os
-from tempfile import NamedTemporaryFile
-import soundfile as sf
+import librosa
 import librosa.display
+import numpy as np
 import matplotlib.pyplot as plt
+import joblib
 import base64
+import soundfile as sf
+import traceback
+import subprocess
+import time
 from io import BytesIO
 from datetime import datetime
-import time
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
-from scipy.io import wavfile
+from tempfile import NamedTemporaryFile
 from tensorflow.keras.models import load_model
-import joblib
-import subprocess
 
-app = FastAPI()
-
-@app.get("/")
-def health():
-    return {"status": "✅ Server is live"}
-
-# تحميل النموذج والبيانات المسبقة
+# === Load models and scalers ===
 try:
-    model = load_model("keras_model.h5")
+    mlp_model = load_model("mlp_model.h5")
+    cnn_model = load_model("cnn_model.h5")
+    rf_model = joblib.load("rf_model.pkl")
     label_encoder = joblib.load("label_encoder.pkl")
     X_train_mean = np.load("x_train_mean.npy")
     X_train_std = np.load("x_train_std.npy")
@@ -453,6 +450,7 @@ except Exception as e:
     traceback.print_exc()
     raise RuntimeError("Server initialization failed")
 
+# === Feature Extraction ===
 def extract_features(y, sr):
     mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13, n_fft=256, hop_length=128, fmax=sr/2)
     if mfcc.shape[1] < 9:
@@ -490,13 +488,14 @@ def extract_features(y, sr):
         normalize_block(agg(rms))
     ])
 
-    expected_feature_size = model.input_shape[-1]
-    if features.shape[0] > expected_feature_size:
-        features = features[:expected_feature_size]
-    elif features.shape[0] < expected_feature_size:
-        features = np.pad(features, (0, expected_feature_size - features.shape[0]), mode='constant')
+    expected_size = mlp_model.input_shape[-1]
+    if features.shape[0] != expected_size:
+        features = np.resize(features, expected_size)
 
     return features
+
+# === FastAPI Setup ===
+app = FastAPI()
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
@@ -504,7 +503,7 @@ async def predict(file: UploadFile = File(...)):
         start_time = time.time()
         print(f"\n🕒 Prediction started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-        # قراءة الملف الصوتي
+        # Save the uploaded file
         audio_data = await file.read()
         with NamedTemporaryFile(delete=False, suffix=".wav") as original_file:
             original_file.write(audio_data)
@@ -513,17 +512,14 @@ async def predict(file: UploadFile = File(...)):
         with NamedTemporaryFile(delete=False, suffix=".wav") as converted_file:
             converted_path = converted_file.name
 
-        command = [
-            "ffmpeg", "-y", "-i", original_path,
-            "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", converted_path
-        ]
+        command = ["ffmpeg", "-y", "-i", original_path, "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", converted_path]
         subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         y, sr = sf.read(converted_path)
         y = y[:sr * 2]
         y = y / (np.max(np.abs(y)) + 1e-6)
 
-        # رسم waveform
+        # Waveform plot
         plt.figure(figsize=(10, 3))
         librosa.display.waveshow(y, sr=sr)
         plt.axis('off')
@@ -533,21 +529,27 @@ async def predict(file: UploadFile = File(...)):
         waveform_base64 = base64.b64encode(buf.getvalue()).decode()
         waveform_uri = f"data:image/png;base64,{waveform_base64}"
 
-        # استخراج الميزات والتطبيع
+        # Extract features
         features = extract_features(y, sr)
-        features = (features - X_train_mean) / X_train_std
-        features = features.reshape(1, -1)
+        features_norm = (features - X_train_mean) / X_train_std
+        features_norm = features_norm.reshape(1, -1)
 
-        pred_probs = model.predict(features)
-        pred_index = np.argmax(pred_probs, axis=1)[0]
-        pred_label = label_encoder.inverse_transform([pred_index])[0]
+        # === Predictions ===
+        mlp_pred = mlp_model.predict(features_norm)
+        cnn_input = features_norm.reshape(1, 15, 12, 1)
+        cnn_pred = cnn_model.predict(cnn_input)
+        rf_pred = rf_model.predict(features_norm)
 
-        print(f"🎯 Prediction: {pred_label}")
-        print(f"📌 Duration: {len(y)/sr:.2f} seconds")
-        print(f"✅ Done in {time.time() - start_time:.2f} seconds")
+        pred_index_mlp = np.argmax(mlp_pred, axis=1)[0]
+        pred_index_cnn = np.argmax(cnn_pred, axis=1)[0]
+        pred_label_mlp = label_encoder.inverse_transform([pred_index_mlp])[0]
+        pred_label_cnn = label_encoder.inverse_transform([pred_index_cnn])[0]
+        pred_label_rf = label_encoder.inverse_transform(rf_pred)[0]
 
         return JSONResponse(content={
-            "prediction": pred_label,
+            "prediction_mlp": pred_label_mlp,
+            "prediction_cnn": pred_label_cnn,
+            "prediction_rf": pred_label_rf,
             "waveform_image_base64": waveform_uri
         })
 
