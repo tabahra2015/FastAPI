@@ -1,29 +1,25 @@
 import os
 import librosa
-import librosa.display
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 import random
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import accuracy_score, classification_report
+from sklearn.ensemble import RandomForestClassifier
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, Dropout
+from tensorflow.keras.layers import Dense, Dropout, Conv2D, MaxPooling2D, Flatten, Reshape
 from tensorflow.keras.utils import to_categorical
-from tensorflow.keras.models import load_model
-import joblib
 
 # === Settings ===
 wav_folder = "converted_wav"
 sr = 16000
-feature_size = 180
+feature_size = 180  # your original feature vector size
 
-# === Feature Extraction ===
+# === Feature extraction function (unchanged) ===
 def extract_features(y, sr):
     mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13, n_fft=256, hop_length=128, fmax=sr/2)
     if mfcc.shape[1] < 9:
         mfcc = np.pad(mfcc, ((0, 0), (0, 9 - mfcc.shape[1])), mode='edge')
-
     delta = librosa.feature.delta(mfcc)
     delta2 = librosa.feature.delta(mfcc, order=2)
     spectral_centroid = librosa.feature.spectral_centroid(y=y, sr=sr)
@@ -56,25 +52,20 @@ def extract_features(y, sr):
         normalize_block(agg(rms))
     ])
 
-    # Resize to ensure fixed feature length
     if features.shape[0] != feature_size:
         features = np.resize(features, feature_size)
-
     return features
 
-# === Load and Split Files ===
+# === Load files and split ===
 all_files = [f for f in os.listdir(wav_folder) if f.endswith(".wav")]
 random.shuffle(all_files)
 split_point = int(0.7 * len(all_files))
 train_files = all_files[:split_point]
 test_files = all_files[split_point:]
 
-print(f"✅ Total files: {len(all_files)}, Train: {len(train_files)}, Test: {len(test_files)}")
-
-# === Extract Features ===
-train_rows, test_rows = [], []
-
-for file_list, target in [(train_files, train_rows), (test_files, test_rows)]:
+# === Extract features and labels ===
+def prepare_dataset(file_list):
+    rows = []
     for file in file_list:
         try:
             path = os.path.join(wav_folder, file)
@@ -82,74 +73,109 @@ for file_list, target in [(train_files, train_rows), (test_files, test_rows)]:
             y = y / np.max(np.abs(y))
             features = extract_features(y, sr)
             label = file[0].upper().strip()
-            row = list(features) + [label, file]
-            target.append(row)
+            rows.append([*features, label, file])
         except Exception as e:
-            print(f"⚠️ Error processing {file}: {e}")
+            print(f"Error processing {file}: {e}")
+    return rows
 
-# === Create DataFrames ===
+train_rows = prepare_dataset(train_files)
+test_rows = prepare_dataset(test_files)
+
 feature_columns = [f'f{i+1}' for i in range(feature_size)]
 columns = feature_columns + ['label', 'filename']
+
 df_train = pd.DataFrame(train_rows, columns=columns).dropna()
 df_test = pd.DataFrame(test_rows, columns=columns).dropna()
 
-# === Encode Labels ===
+# === Label Encoding ===
 le = LabelEncoder()
 df_train['label'] = df_train['label'].astype(str).str.strip().str.upper()
 df_test['label'] = df_test['label'].astype(str).str.strip().str.upper()
 df_train['label_encoded'] = le.fit_transform(df_train['label'])
 df_test['label_encoded'] = le.transform(df_test['label'])
 
-# === Prepare Features and Labels ===
+# === Prepare feature matrices and labels ===
 X_train = df_train[feature_columns].astype(float).values
 X_test = df_test[feature_columns].astype(float).values
-y_train = to_categorical(df_train['label_encoded'].values)
-y_test = to_categorical(df_test['label_encoded'].values)
-filenames_test = df_test['filename'].values
+y_train_int = df_train['label_encoded'].values
+y_test_int = df_test['label_encoded'].values
+y_train_cat = to_categorical(y_train_int)
+y_test_cat = to_categorical(y_test_int)
 
-# === Normalize ===
+# === Normalize for NN ===
 mean = X_train.mean(axis=0)
 std = X_train.std(axis=0) + 1e-8
-X_train = (X_train - mean) / std
-X_test = (X_test - mean) / std
+X_train_norm = (X_train - mean) / std
+X_test_norm = (X_test - mean) / std
 
-# === Build Neural Network Model ===
-model = Sequential([
+# === Random Forest ===
+print("🔵 Training Random Forest...")
+rf = RandomForestClassifier(n_estimators=100, random_state=42)
+rf.fit(X_train, y_train_int)
+rf_preds = rf.predict(X_test)
+rf_acc = accuracy_score(y_test_int, rf_preds)
+print(f"Random Forest Accuracy: {rf_acc:.4f}")
+
+# === MLP Model ===
+print("\n🟢 Training MLP model...")
+from tensorflow.keras.callbacks import EarlyStopping
+
+mlp_model = Sequential([
     Dense(256, input_shape=(feature_size,), activation='relu'),
     Dropout(0.3),
     Dense(128, activation='relu'),
     Dropout(0.3),
-    Dense(y_train.shape[1], activation='softmax')
+    Dense(y_train_cat.shape[1], activation='softmax')
 ])
+mlp_model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
 
-model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+mlp_model.fit(X_train_norm, y_train_cat, epochs=30, batch_size=32, validation_split=0.2, verbose=1)
 
-# === Train Model ===
-print("\n🚀 Training the model...")
-model.fit(X_train, y_train, epochs=30, batch_size=32, validation_split=0.2)
+mlp_loss, mlp_acc = mlp_model.evaluate(X_test_norm, y_test_cat, verbose=0)
+print(f"MLP Test Accuracy: {mlp_acc:.4f}")
 
-# === Evaluate ===
-print("\n✅ Evaluating on test set...")
-test_loss, test_acc = model.evaluate(X_test, y_test)
-print(f"\n🎯 Test Accuracy: {test_acc:.2f}")
+mlp_preds = np.argmax(mlp_model.predict(X_test_norm), axis=1)
 
-y_pred = model.predict(X_test)
-y_pred_labels = np.argmax(y_pred, axis=1)
-y_true_labels = np.argmax(y_test, axis=1)
+# === CNN Model ===
+print("\n🟠 Training CNN model...")
 
-print("\n📄 Classification Report:")
-print(classification_report(y_true_labels, y_pred_labels, target_names=le.classes_))
+# Reshape for CNN: (samples, height, width, channels)
+# Here reshape (180,) → (15, 12, 1)
+X_train_cnn = X_train_norm.reshape(-1, 15, 12, 1)
+X_test_cnn = X_test_norm.reshape(-1, 15, 12, 1)
 
-# === Prediction on Files ===
-print("\n🔍 Predictions on test files:")
-for i in range(len(filenames_test)):
-    pred_label = le.inverse_transform([y_pred_labels[i]])[0]
-    print(f"📂 File: {filenames_test[i]}  -->  📢 Predicted Letter: {pred_label}")
+cnn_model = Sequential([
+    Conv2D(32, (3, 3), activation='relu', input_shape=(15, 12, 1)),
+    MaxPooling2D((2, 2)),
+    Conv2D(64, (3, 3), activation='relu'),
+    MaxPooling2D((2, 2)),
+    Flatten(),
+    Dense(128, activation='relu'),
+    Dropout(0.3),
+    Dense(y_train_cat.shape[1], activation='softmax')
+])
+cnn_model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
 
-# === Save Model and Scaler ===
-model.save("keras_model.h5")
-joblib.dump(le, "label_encoder.pkl")
-np.save("x_train_mean.npy", mean)
-np.save("x_train_std.npy", std)
+cnn_model.fit(X_train_cnn, y_train_cat, epochs=30, batch_size=32, validation_split=0.2, verbose=1)
 
-print("\n💾 Saved model and encoders.")
+cnn_loss, cnn_acc = cnn_model.evaluate(X_test_cnn, y_test_cat, verbose=0)
+print(f"CNN Test Accuracy: {cnn_acc:.4f}")
+
+cnn_preds = np.argmax(cnn_model.predict(X_test_cnn), axis=1)
+
+# === Final comparison ===
+print("\n=== Accuracy Comparison ===")
+print(f"Random Forest: {rf_acc:.4f}")
+print(f"MLP:           {mlp_acc:.4f}")
+print(f"CNN:           {cnn_acc:.4f}")
+
+# === Detailed reports ===
+from sklearn.metrics import classification_report
+print("\nRandom Forest Classification Report:")
+print(classification_report(y_test_int, rf_preds, target_names=le.classes_))
+
+print("\nMLP Classification Report:")
+print(classification_report(y_test_int, mlp_preds, target_names=le.classes_))
+
+print("\nCNN Classification Report:")
+print(classification_report(y_test_int, cnn_preds, target_names=le.classes_))

@@ -440,12 +440,11 @@ app = FastAPI()
 @app.get("/")
 def root():
     return {"status": "✅ Server is running"}
-
 # === Load models and preprocessing ===
 try:
     model_keras = load_model("keras_model.h5")
     model_rf = joblib.load("random_forest_model.pkl")
-    # model_svm = joblib.load("svm_model.pkl")  # ⛔️ مؤقتًا معطل
+    model_svm = joblib.load("svm_model.pkl")  # Now enabled
     label_encoder = joblib.load("label_encoder.pkl")
     X_train_mean = np.load("x_train_mean.npy")
     X_train_std = np.load("x_train_std.npy")
@@ -540,21 +539,25 @@ async def predict(file: UploadFile = File(...)):
         # Predictions
         prob_keras = model_keras.predict(features_scaled)
         label_keras = label_encoder.inverse_transform([np.argmax(prob_keras)])[0]
+
         label_rf = label_encoder.inverse_transform(model_rf.predict(features_scaled))[0]
 
-        print(f"🎯 Keras: {label_keras} | RF: {label_rf}")
+        label_svm = label_encoder.inverse_transform(model_svm.predict(features_scaled))[0]
+
+        print(f"🎯 Keras: {label_keras} | RF: {label_rf} | SVM: {label_svm}")
         print(f"✅ Done in {time.time() - start_time:.2f} seconds")
 
         return JSONResponse(content={
             "keras_prediction": label_keras,
             "random_forest_prediction": label_rf,
+            "svm_prediction": label_svm,
             "waveform_image_base64": waveform_uri
         })
 
     except Exception as e:
-        print("❌ Prediction failed:", e)
+        print("❌ Prediction error")
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail="Prediction crashed on server.")
+        raise HTTPException(status_code=500, detail="Prediction failed")
 
 # === Analyze Endpoint ===
 @app.post("/analyze")
