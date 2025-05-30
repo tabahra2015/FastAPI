@@ -445,6 +445,8 @@ try:
     label_encoder = joblib.load("label_encoder.pkl")
     X_train_mean = np.load("x_train_mean.npy")
     X_train_std = np.load("x_train_std.npy")
+ 
+
 except Exception:
     print("❌ Model or preprocessing files could not be loaded.")
     traceback.print_exc()
@@ -454,8 +456,12 @@ except Exception:
 # === Feature Extraction Function ===
 def extract_features(y, sr):
     mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13, n_fft=256, hop_length=128, fmax=sr / 2)
-    if mfcc.shape[1] < 9:
-        mfcc = np.pad(mfcc, ((0, 0), (0, 9 - mfcc.shape[1])), mode='edge')
+
+    # 🔧 Fix MFCC shape to always (13, 40)
+    if mfcc.shape[1] > 40:
+        mfcc = mfcc[:, :40]
+    elif mfcc.shape[1] < 40:
+        mfcc = np.pad(mfcc, ((0, 0), (0, 40 - mfcc.shape[1])), mode='edge')
 
     delta = librosa.feature.delta(mfcc)
     delta2 = librosa.feature.delta(mfcc, order=2)
@@ -489,12 +495,12 @@ def extract_features(y, sr):
         normalize_block(agg(rms))
     ])
 
+    # ✅ Resize to match model input
     expected_size = mlp_model.input_shape[-1]
     if features.shape[0] != expected_size:
         features = np.resize(features, expected_size)
 
     return features
-
 
 # === FastAPI App Setup ===
 app = FastAPI()

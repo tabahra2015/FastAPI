@@ -153,6 +153,8 @@ cnn_preds = np.argmax(cnn_model.predict(X_test_cnn), axis=1)
 
 # === Save Models ===
 print("\n💾 Saving all models...")
+np.save("x_train_mean.npy", mean)
+np.save("x_train_std.npy", std)
 
 # Save Random Forest
 joblib.dump(rf, "random_forest_model.pkl")
