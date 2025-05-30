@@ -445,7 +445,7 @@ try:
     label_encoder = joblib.load("label_encoder.pkl")
     X_train_mean = np.load("x_train_mean.npy")
     X_train_std = np.load("x_train_std.npy")
-    rf_model = joblib.load("random_forest.pkl")
+    rf_model = joblib.load("random_forest_model.pkl")
 except Exception as e:
     print("❌ Model or preprocessing files could not be loaded.")
     traceback.print_exc()
