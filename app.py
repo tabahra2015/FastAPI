@@ -418,46 +418,42 @@
 #         traceback.print_exc()
 #         raise HTTPException(status_code=500, detail="Prediction crashed on server.")
 
-
-import time
-import base64
-import traceback
-import subprocess
-import numpy as np
-import matplotlib.pyplot as plt
-import librosa
-import librosa.display
-import soundfile as sf
-import joblib
-
-from io import BytesIO
-from tempfile import NamedTemporaryFile
-from datetime import datetime
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
-from keras.models import load_model
+from tempfile import NamedTemporaryFile
+import soundfile as sf
+import subprocess
+import librosa
+import base64
+import traceback
+import numpy as np
+import matplotlib.pyplot as plt
+import librosa.display
+from io import BytesIO
+import time
+from datetime import datetime
+import joblib
+from tensorflow.keras.models import load_model
+from sklearn.ensemble import RandomForestClassifier
 
-# === Load Models and Preprocessing Artifacts ===
+app = FastAPI()
+
+# === Load Models and Metadata ===
 try:
     mlp_model = load_model("mlp_model.h5")
     cnn_model = load_model("cnn_model.h5")
-    rf_model = joblib.load("random_forest_model.pkl")
     label_encoder = joblib.load("label_encoder.pkl")
     X_train_mean = np.load("x_train_mean.npy")
     X_train_std = np.load("x_train_std.npy")
- 
-
-except Exception:
+    rf_model = joblib.load("random_forest.pkl")
+except Exception as e:
     print("❌ Model or preprocessing files could not be loaded.")
     traceback.print_exc()
     raise RuntimeError("Server initialization failed")
 
-
-# === Feature Extraction Function ===
+# === Feature Extraction ===
 def extract_features(y, sr):
     mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13, n_fft=256, hop_length=128, fmax=sr / 2)
-
-    # 🔧 Fix MFCC shape to always (13, 40)
     if mfcc.shape[1] > 40:
         mfcc = mfcc[:, :40]
     elif mfcc.shape[1] < 40:
@@ -495,16 +491,63 @@ def extract_features(y, sr):
         normalize_block(agg(rms))
     ])
 
-    # ✅ Resize to match model input
-    expected_size = mlp_model.input_shape[-1]
-    if features.shape[0] != expected_size:
-        features = np.resize(features, expected_size)
-
     return features
 
-# === FastAPI App Setup ===
-app = FastAPI()
+# === Prediction Endpoint ===
+@app.post("/predict")
+async def predict(file: UploadFile = File(...)):
+    try:
+        start_time = time.time()
+        with NamedTemporaryFile(delete=False, suffix=".wav") as original_file:
+            original_file.write(await file.read())
+            original_path = original_file.name
 
+        with NamedTemporaryFile(delete=False, suffix=".wav") as converted_file:
+            converted_path = converted_file.name
+
+        command = ["ffmpeg", "-y", "-i", original_path, "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", converted_path]
+        subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        y, sr = sf.read(converted_path)
+        y = y[:sr * 2]
+        y = y / (np.max(np.abs(y)) + 1e-6)
+
+        features = extract_features(y, sr)
+        normed = (features - X_train_mean) / X_train_std
+        normed = normed.reshape(1, -1)
+
+        # MLP
+        mlp_pred = mlp_model.predict(normed)
+        mlp_label = label_encoder.inverse_transform([np.argmax(mlp_pred)])[0]
+
+        # CNN
+        cnn_input = normed.reshape(1, 15, 12, 1)
+        cnn_pred = cnn_model.predict(cnn_input)
+        cnn_label = label_encoder.inverse_transform([np.argmax(cnn_pred)])[0]
+
+        # Random Forest
+        rf_label = label_encoder.inverse_transform(rf_model.predict(normed))[0]
+
+        # Waveform image
+        plt.figure(figsize=(10, 3))
+        librosa.display.waveshow(y, sr=sr)
+        plt.axis('off')
+        buf = BytesIO()
+        plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
+        plt.close()
+        waveform_uri = f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}"
+
+        return JSONResponse(content={
+            "keras_prediction": mlp_label,
+            "cnn_prediction": cnn_label,
+            "random_forest_prediction": rf_label,
+            "waveform_image_base64": waveform_uri
+        })
+
+    except Exception as e:
+        print("❌ Prediction failed:", e)
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail="Prediction failed.")
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
